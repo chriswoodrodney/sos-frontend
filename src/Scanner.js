@@ -1,5 +1,20 @@
+// src/Scanner.js
 import React, { useCallback, useEffect, useRef, useState } from "react";
 
+/* ---------------- Stable config constants (top-level) ---------------- */
+const CONFIDENCE_THRESHOLD = 0.7;
+const ALLOWED_CLASSES = [
+  "mask",
+  "gloves",
+  "syringe",
+  "bandage",
+  "catheter",
+  "gown"
+];
+
+const YOLO_URL = process.env.REACT_APP_YOLO_URL || "https://YOUR-RAILWAY-URL.up.railway.app/detect";
+
+/* ---------------- Component ---------------- */
 const ObjectIdentifier = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -9,20 +24,6 @@ const ObjectIdentifier = () => {
   const [detections, setDetections] = useState([]);
   const [ocrText, setOcrText] = useState([]);
   const [confirmedItem, setConfirmedItem] = useState(null);
-
-  // 🔐 GUARDRAILS CONFIG
-  const CONFIDENCE_THRESHOLD = 0.7;
-
-  const ALLOWED_CLASSES = [
-    "mask",
-    "gloves",
-    "syringe",
-    "bandage",
-    "catheter",
-    "gown"
-  ];
-
-  const YOLO_URL = "https://YOUR-RAILWAY-URL.up.railway.app/detect";
 
   /* ---------------- GUARDRAILS ---------------- */
   const applyGuardrails = useCallback((rawDetections) => {
@@ -47,13 +48,13 @@ const ObjectIdentifier = () => {
       setStatus("Review prediction and confirm");
       setDetections(filtered);
     }
-  }, [CONFIDENCE_THRESHOLD, ALLOWED_CLASSES]);
+  }, []); // no changing deps — config is stable at top-level
 
   /* ---------------- YOLO REQUEST ---------------- */
   const sendFrameToYOLO = useCallback(async () => {
     const videoEl = videoRef.current;
     const canvas = canvasRef.current;
-    if (!videoEl || videoEl.readyState !== 4 || !canvas) return;
+    if (!videoEl || videoEl.readyState < 2 || !canvas) return;
 
     const ctx = canvas.getContext("2d");
     canvas.width = videoEl.videoWidth || 640;
@@ -86,7 +87,7 @@ const ObjectIdentifier = () => {
       setStatus("YOLO connection error");
       setDetections([]);
     }
-  }, [YOLO_URL, applyGuardrails]);
+  }, [applyGuardrails]);
 
   /* ---------------- CAMERA ---------------- */
   const startCamera = useCallback(async () => {
@@ -119,9 +120,14 @@ const ObjectIdentifier = () => {
         if (mountedVideo?.srcObject) {
           mountedVideo.srcObject.getTracks().forEach(t => t.stop());
         }
-      } catch {}
+      } catch (e) {
+        // swallow
+      }
 
-      if (intervalRef.current) clearInterval(intervalRef.current);
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
     };
   }, [startCamera]);
 
