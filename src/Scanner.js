@@ -48,7 +48,7 @@ const ObjectIdentifier = () => {
       setStatus("Review prediction and confirm");
       setDetections(filtered);
     }
-  }, []); // no changing deps — config is stable at top-level
+  }, []); // config is stable at top-level
 
   /* ---------------- YOLO REQUEST ---------------- */
   const sendFrameToYOLO = useCallback(async () => {
@@ -111,8 +111,10 @@ const ObjectIdentifier = () => {
 
   /* ---------------- LIFECYCLE ---------------- */
   useEffect(() => {
+    // start camera using stable callback
     startCamera();
 
+    // copy ref to a local variable for cleanup to silence the linter
     const mountedVideo = videoRef.current;
 
     return () => {
