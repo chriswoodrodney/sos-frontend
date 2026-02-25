@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 
 const ObjectIdentifier = () => {
   const videoRef = useRef(null);
@@ -23,39 +23,10 @@ const ObjectIdentifier = () => {
   ];
 
   const YOLO_URL =
-  "https://YOUR-RAILWAY-URL.up.railway.app/detect";
+    "https://YOUR-RAILWAY-URL.up.railway.app/detect";
 
-  useEffect(() => {
-    startCamera();
-
-    return () => {
-      if (videoRef.current?.srcObject) {
-        videoRef.current.srcObject
-          .getTracks()
-          .forEach(track => track.stop());
-      }
-      clearInterval(intervalRef.current);
-    };
-  }, []);
-
-  const startCamera = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment" }
-      });
-
-      videoRef.current.srcObject = stream;
-      setStatus("Camera running");
-
-      intervalRef.current = setInterval(sendFrameToYOLO, 1500);
-
-    } catch (err) {
-      console.error(err);
-      setStatus("Camera error: " + err.message);
-    }
-  };
-
-  const sendFrameToYOLO = async () => {
+  // ✅ Wrapped in useCallback to satisfy ESLint
+  const sendFrameToYOLO = useCallback(async () => {
     if (!videoRef.current || videoRef.current.readyState !== 4) return;
 
     const canvas = canvasRef.current;
@@ -81,7 +52,6 @@ const ObjectIdentifier = () => {
 
       const data = await res.json();
 
-      // Store OCR text
       if (data.ocr_text) {
         setOcrText(data.ocr_text);
       } else {
@@ -98,23 +68,60 @@ const ObjectIdentifier = () => {
       console.error("YOLO error:", err);
       setStatus("YOLO connection error");
     }
-  };
+  }, []);
+
+  // ✅ Wrapped in useCallback
+  const startCamera = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment" }
+      });
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
+
+      setStatus("Camera running");
+
+      intervalRef.current = setInterval(sendFrameToYOLO, 1500);
+
+    } catch (err) {
+      console.error(err);
+      setStatus("Camera error: " + err.message);
+    }
+  }, [sendFrameToYOLO]);
+
+  // ✅ ESLint-safe useEffect
+  useEffect(() => {
+    startCamera();
+
+    const videoElement = videoRef.current;
+
+    return () => {
+      if (videoElement && videoElement.srcObject) {
+        videoElement.srcObject
+          .getTracks()
+          .forEach((track) => track.stop());
+      }
+
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+      }
+    };
+  }, [startCamera]);
 
   // 🔐 APPLY ALL GUARDRAILS
   const applyGuardrails = (rawDetections) => {
     setConfirmedItem(null);
 
-    // 1️⃣ Confidence filter
     let filtered = rawDetections.filter(
       d => d.confidence >= CONFIDENCE_THRESHOLD
     );
 
-    // 2️⃣ Medical whitelist filter
     filtered = filtered.filter(d =>
       ALLOWED_CLASSES.includes(d.label.toLowerCase())
     );
 
-    // 3️⃣ Sort + top 3
     filtered = filtered
       .sort((a, b) => b.confidence - a.confidence)
       .slice(0, 3);
@@ -181,7 +188,6 @@ const ObjectIdentifier = () => {
         ))
       )}
 
-      {/* Unknown Option */}
       {detections.length === 0 && (
         <button
           onClick={() => setConfirmedItem("Unknown")}
@@ -196,7 +202,6 @@ const ObjectIdentifier = () => {
         </button>
       )}
 
-      {/* Confirmed Item Display */}
       {confirmedItem && (
         <div style={{ marginTop: 20 }}>
           <h3>Confirmed Item:</h3>
@@ -204,7 +209,6 @@ const ObjectIdentifier = () => {
         </div>
       )}
 
-      {/* OCR Text Display */}
       {ocrText.length > 0 && (
         <div style={{ marginTop: 25 }}>
           <h3>Detected Text (OCR):</h3>
