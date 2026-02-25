@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 
 const ObjectIdentifier = () => {
   const videoRef = useRef(null);
@@ -22,57 +22,55 @@ const ObjectIdentifier = () => {
     "gown"
   ];
 
-  const YOLO_URL =
-    "https://YOUR-RAILWAY-URL.up.railway.app/detect";
+  // Replace with your deployed backend URL (Railway / Render)
+  const YOLO_URL = "https://YOUR-RAILWAY-URL.up.railway.app/detect";
 
-  // ✅ Wrapped in useCallback to satisfy ESLint
+  // sendFrameToYOLO doesn't need to be a dependency of startCamera, so it's defined with useCallback
   const sendFrameToYOLO = useCallback(async () => {
-    if (!videoRef.current || videoRef.current.readyState !== 4) return;
-
+    const videoEl = videoRef.current;
     const canvas = canvasRef.current;
+    if (!videoEl || videoEl.readyState !== 4 || !canvas) return;
+
     const context = canvas.getContext("2d");
+    canvas.width = videoEl.videoWidth;
+    canvas.height = videoEl.videoHeight;
+    context.drawImage(videoEl, 0, 0);
 
-    canvas.width = videoRef.current.videoWidth;
-    canvas.height = videoRef.current.videoHeight;
-
-    context.drawImage(videoRef.current, 0, 0);
-
-    const imageBase64 = canvas
-      .toDataURL("image/jpeg", 0.7)
-      .split(",")[1];
+    const imageBase64 = canvas.toDataURL("image/jpeg", 0.7).split(",")[1];
 
     try {
       const res = await fetch(YOLO_URL, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ imageBase64 })
       });
 
+      if (!res.ok) {
+        throw new Error(`Backend responded ${res.status}`);
+      }
+
       const data = await res.json();
 
-      if (data.ocr_text) {
-        setOcrText(data.ocr_text);
-      } else {
-        setOcrText([]);
-      }
+      // Store OCR text if provided by backend
+      if (data.ocr_text) setOcrText(Array.isArray(data.ocr_text) ? data.ocr_text : [data.ocr_text]);
+      else setOcrText([]);
 
       if (data && Array.isArray(data.detections)) {
         applyGuardrails(data.detections);
       } else {
         setDetections([]);
       }
-
     } catch (err) {
       console.error("YOLO error:", err);
       setStatus("YOLO connection error");
+      setDetections([]);
     }
-  }, []);
+  }, [YOLO_URL]);
 
-  // ✅ Wrapped in useCallback
+  // startCamera is memoized so it can be safely used in useEffect deps
   const startCamera = useCallback(async () => {
     try {
+      // Request environment camera
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "environment" }
       });
@@ -80,50 +78,59 @@ const ObjectIdentifier = () => {
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
       }
-
       setStatus("Camera running");
 
-      intervalRef.current = setInterval(sendFrameToYOLO, 1500);
-
+      // start the capture loop (1.5s)
+      if (intervalRef.current) clearInterval(intervalRef.current);
+      intervalRef.current = setInterval(() => {
+        sendFrameToYOLO();
+      }, 1500);
     } catch (err) {
       console.error(err);
-      setStatus("Camera error: " + err.message);
+      // navigator.mediaDevices may be undefined in some browsers/environments
+      setStatus("Camera error: " + (err?.message || String(err)));
     }
   }, [sendFrameToYOLO]);
 
-  // ✅ ESLint-safe useEffect
   useEffect(() => {
+    // start camera on mount
     startCamera();
 
-    const videoElement = videoRef.current;
+    // capture current video element snapshot for cleanup (prevents ref-change warning)
+    const videoElAtMount = videoRef.current;
 
     return () => {
-      if (videoElement && videoElement.srcObject) {
-        videoElement.srcObject
-          .getTracks()
-          .forEach((track) => track.stop());
+      // stop tracks on the element that was mounted
+      if (videoElAtMount?.srcObject) {
+        try {
+          videoElAtMount.srcObject.getTracks().forEach((t) => t.stop());
+        } catch (e) {
+          console.warn("Error stopping tracks", e);
+        }
       }
-
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
+        intervalRef.current = null;
       }
     };
+    // startCamera is stable via useCallback so safe to include
   }, [startCamera]);
 
   // 🔐 APPLY ALL GUARDRAILS
   const applyGuardrails = (rawDetections) => {
     setConfirmedItem(null);
 
-    let filtered = rawDetections.filter(
-      d => d.confidence >= CONFIDENCE_THRESHOLD
+    // 1️⃣ Confidence filter
+    let filtered = rawDetections.filter((d) => Number(d.confidence) >= CONFIDENCE_THRESHOLD);
+
+    // 2️⃣ Medical whitelist filter
+    filtered = filtered.filter((d) =>
+      ALLOWED_CLASSES.includes(String(d.label).toLowerCase())
     );
 
-    filtered = filtered.filter(d =>
-      ALLOWED_CLASSES.includes(d.label.toLowerCase())
-    );
-
+    // 3️⃣ Sort + keep top 3
     filtered = filtered
-      .sort((a, b) => b.confidence - a.confidence)
+      .sort((a, b) => Number(b.confidence) - Number(a.confidence))
       .slice(0, 3);
 
     if (filtered.length === 0) {
@@ -188,6 +195,7 @@ const ObjectIdentifier = () => {
         ))
       )}
 
+      {/* Unknown Option */}
       {detections.length === 0 && (
         <button
           onClick={() => setConfirmedItem("Unknown")}
@@ -202,6 +210,7 @@ const ObjectIdentifier = () => {
         </button>
       )}
 
+      {/* Confirmed Item Display */}
       {confirmedItem && (
         <div style={{ marginTop: 20 }}>
           <h3>Confirmed Item:</h3>
@@ -209,6 +218,7 @@ const ObjectIdentifier = () => {
         </div>
       )}
 
+      {/* OCR Text Display */}
       {ocrText.length > 0 && (
         <div style={{ marginTop: 25 }}>
           <h3>Detected Text (OCR):</h3>
