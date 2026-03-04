@@ -1,22 +1,27 @@
 // src/Scanner.js
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+/* ---------------- Stable config constants (top-level) ---------------- */
 const CONFIDENCE_THRESHOLD = 0.45;
 const ALLOWED_CLASSES = ["mask", "gloves", "syringe", "bandage", "catheter", "gown"];
 
 const DEFAULT_YOLO_URL = "https://sos-vision-backend-production.up.railway.app/detect";
 
+/**
+ * Force HTTPS + avoid accidental relative URLs (which become same-origin to Vercel)
+ */
 function normalizeBackendUrl(rawUrl) {
   if (!rawUrl) return "";
   let url = String(rawUrl).trim();
 
-  // add scheme if missing
+  // If someone pasted "sos-vision-backend..." without scheme
   if (!/^https?:\/\//i.test(url)) {
     url = "https://" + url.replace(/^\/+/, "");
   }
 
-  // force https
+  // Force https
   url = url.replace(/^http:\/\//i, "https://");
+
   return url;
 }
 
@@ -30,7 +35,6 @@ const ObjectIdentifier = () => {
   const [detections, setDetections] = useState([]);
   const [ocrText, setOcrText] = useState([]);
   const [confirmedItem, setConfirmedItem] = useState(null);
-  const [debug, setDebug] = useState(null);
 
   const YOLO_URL = useMemo(() => {
     return normalizeBackendUrl(process.env.REACT_APP_YOLO_URL || DEFAULT_YOLO_URL);
@@ -42,18 +46,14 @@ const ObjectIdentifier = () => {
     let filtered = Array.isArray(rawDetections) ? rawDetections.slice() : [];
 
     filtered = filtered.filter((d) => Number(d.confidence) >= CONFIDENCE_THRESHOLD);
-
-    filtered = filtered.filter((d) =>
-      ALLOWED_CLASSES.includes(String(d.label).toLowerCase())
-    );
-
+    filtered = filtered.filter((d) => ALLOWED_CLASSES.includes(String(d.label).toLowerCase()));
     filtered = filtered
       .sort((a, b) => Number(b.confidence) - Number(a.confidence))
       .slice(0, 3);
 
     if (filtered.length === 0) {
-      // IMPORTANT: don't wipe OCR status here. OCR may still be useful.
-      setStatus("No confident object — OCR may still help");
+      // ✅ Restore original UI wording (no extra OCR messaging)
+      setStatus("Low confidence or non-medical item detected");
       setDetections([]);
     } else {
       setStatus("Review prediction and confirm");
@@ -78,8 +78,10 @@ const ObjectIdentifier = () => {
       }
 
       const ctx = canvas.getContext("2d");
-      const w = videoEl.videoWidth || 1280;
-      const h = videoEl.videoHeight || 720;
+
+      // keep as much detail as possible for OCR
+      const w = videoEl.videoWidth || 640;
+      const h = videoEl.videoHeight || 480;
       canvas.width = w;
       canvas.height = h;
 
@@ -87,7 +89,7 @@ const ObjectIdentifier = () => {
       ctx.imageSmoothingQuality = "high";
       ctx.drawImage(videoEl, 0, 0, w, h);
 
-      // higher quality to help OCR
+      // Higher JPEG quality helps OCR a LOT
       const imageBase64 = canvas.toDataURL("image/jpeg", 0.92).split(",")[1];
 
       const controller = new AbortController();
@@ -103,20 +105,19 @@ const ObjectIdentifier = () => {
       clearTimeout(timeout);
 
       if (!res.ok) {
-        if (res.status === 405) setStatus("Backend 405: wrong URL — must end with /detect");
-        else if (res.status === 404) setStatus("Backend 404: check REACT_APP_YOLO_URL");
-        else setStatus(`Backend HTTP ${res.status}`);
-
+        if (res.status === 405) {
+          setStatus("Backend 405: wrong URL — must end with /detect");
+        } else if (res.status === 404) {
+          setStatus("Backend 404: check REACT_APP_YOLO_URL");
+        } else {
+          setStatus(`Backend HTTP ${res.status}`);
+        }
         setDetections([]);
         setOcrText([]);
-        setDebug(null);
         return;
       }
 
       const data = await res.json();
-
-      // show backend debug if present
-      setDebug(data._debug || null);
 
       const ocr = data.ocr_text
         ? Array.isArray(data.ocr_text)
@@ -129,13 +130,14 @@ const ObjectIdentifier = () => {
       if (Array.isArray(data.detections)) {
         applyGuardrails(data.detections);
       } else {
+        // ✅ When no detections, keep original wording (do NOT override status)
         setDetections([]);
+        setStatus("Low confidence or non-medical item detected");
       }
 
-      // If OCR returns something, update status so you KNOW OCR worked
-      if (ocr.length > 0) {
-        setStatus("Text detected — OCR running");
-      }
+      // ❌ Removed: status override like "Text detected — using OCR assistance"
+      // We keep UI exactly like your screenshot, and OCR text just appears below if found.
+
     } catch (err) {
       if (err?.name === "AbortError") {
         setStatus("Backend request timed out");
@@ -145,7 +147,6 @@ const ObjectIdentifier = () => {
       }
       setDetections([]);
       setOcrText([]);
-      setDebug(null);
     } finally {
       inflightRef.current = false;
     }
@@ -153,8 +154,13 @@ const ObjectIdentifier = () => {
 
   const startCamera = useCallback(async () => {
     try {
+      // Optional: request higher resolution to improve OCR
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment" },
+        video: {
+          facingMode: "environment",
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
       });
 
       if (videoRef.current) videoRef.current.srcObject = stream;
@@ -202,11 +208,20 @@ const ObjectIdentifier = () => {
       <canvas ref={canvasRef} style={{ display: "none" }} />
 
       <h3>Detected Objects:</h3>
+
       {detections.length === 0 ? (
         <p>No valid objects detected</p>
       ) : (
         detections.map((d, i) => (
-          <div key={i} style={{ marginBottom: 12, padding: 10, border: "1px solid #ddd", borderRadius: 8 }}>
+          <div
+            key={i}
+            style={{
+              marginBottom: 12,
+              padding: 10,
+              border: "1px solid #ddd",
+              borderRadius: 8,
+            }}
+          >
             <strong>
               {d.label} ({Math.round(Number(d.confidence) * 100)}%)
             </strong>
@@ -217,6 +232,10 @@ const ObjectIdentifier = () => {
         ))
       )}
 
+      {detections.length === 0 && (
+        <button onClick={() => setConfirmedItem("Unknown")}>Mark as Unknown</button>
+      )}
+
       {confirmedItem && (
         <div style={{ marginTop: 20 }}>
           <h3>Confirmed Item:</h3>
@@ -224,29 +243,18 @@ const ObjectIdentifier = () => {
         </div>
       )}
 
-      {ocrText.length > 0 ? (
+      {ocrText.length > 0 && (
         <div style={{ marginTop: 25 }}>
           <h3>Detected Text (OCR):</h3>
           {ocrText.map((t, idx) => (
             <div key={idx}>{t}</div>
           ))}
         </div>
-      ) : (
-        <div style={{ marginTop: 25 }}>
-          <h3>Detected Text (OCR):</h3>
-          <div style={{ color: "#666" }}>No text detected</div>
-        </div>
       )}
 
       <div style={{ marginTop: 18, fontSize: 12, color: "#666" }}>
         Backend: {YOLO_URL}
       </div>
-
-      {debug && (
-        <div style={{ marginTop: 10, fontSize: 12, color: "#666" }}>
-          OCR debug: raw={debug.raw_lines}, proc={debug.proc_lines}, merged={debug.merged_lines}, min_conf={debug.min_conf}
-        </div>
-      )}
     </div>
   );
 };
