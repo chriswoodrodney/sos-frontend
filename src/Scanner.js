@@ -1,32 +1,46 @@
 // src/Scanner.js
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 /* ---------------- Stable config constants (top-level) ---------------- */
-const CONFIDENCE_THRESHOLD = 0.7;
-const ALLOWED_CLASSES = [
-  "mask",
-  "gloves",
-  "syringe",
-  "bandage",
-  "catheter",
-  "gown"
-];
+const CONFIDENCE_THRESHOLD = 0.45; // lowered so YOLO results show up more often
+const ALLOWED_CLASSES = ["mask", "gloves", "syringe", "bandage", "catheter", "gown"];
 
-// Default production backend (replace with your own env var in dev / CI as needed)
-// If you want to override, set REACT_APP_YOLO_URL in your environment.
+// Default production backend
 const DEFAULT_YOLO_URL = "https://sos-vision-backend-production.up.railway.app/detect";
-const YOLO_URL = process.env.REACT_APP_YOLO_URL || DEFAULT_YOLO_URL;
+
+/**
+ * Force HTTPS + avoid accidental relative URLs (which become same-origin to Vercel)
+ */
+function normalizeBackendUrl(rawUrl) {
+  if (!rawUrl) return "";
+  let url = String(rawUrl).trim();
+
+  // If someone pasted "sos-vision-backend..." without scheme
+  if (!/^https?:\/\//i.test(url)) {
+    url = "https://" + url.replace(/^\/+/, "");
+  }
+
+  // Force https
+  url = url.replace(/^http:\/\//i, "https://");
+
+  return url;
+}
 
 /* ---------------- Component ---------------- */
 const ObjectIdentifier = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const intervalRef = useRef(null);
+  const inflightRef = useRef(false);
 
   const [status, setStatus] = useState("Starting camera...");
   const [detections, setDetections] = useState([]);
   const [ocrText, setOcrText] = useState([]);
   const [confirmedItem, setConfirmedItem] = useState(null);
+
+  const YOLO_URL = useMemo(() => {
+    return normalizeBackendUrl(process.env.REACT_APP_YOLO_URL || DEFAULT_YOLO_URL);
+  }, []);
 
   /* ---------------- GUARDRAILS ---------------- */
   const applyGuardrails = useCallback((rawDetections) => {
@@ -34,9 +48,9 @@ const ObjectIdentifier = () => {
 
     let filtered = Array.isArray(rawDetections) ? rawDetections.slice() : [];
 
-    filtered = filtered.filter(d => Number(d.confidence) >= CONFIDENCE_THRESHOLD);
+    filtered = filtered.filter((d) => Number(d.confidence) >= CONFIDENCE_THRESHOLD);
 
-    filtered = filtered.filter(d =>
+    filtered = filtered.filter((d) =>
       ALLOWED_CLASSES.includes(String(d.label).toLowerCase())
     );
 
@@ -51,63 +65,54 @@ const ObjectIdentifier = () => {
       setStatus("Review prediction and confirm");
       setDetections(filtered);
     }
-  }, []); // config is stable at top-level
+  }, []);
 
   /* ---------------- YOLO REQUEST ---------------- */
   const sendFrameToYOLO = useCallback(async () => {
+    // prevent piling up requests (important on slow networks)
+    if (inflightRef.current) return;
+    inflightRef.current = true;
+
     const videoEl = videoRef.current;
     const canvas = canvasRef.current;
-    if (!videoEl || videoEl.readyState < 2 || !canvas) return;
-
-    // quick guard for mistaken relative paths in production
-    if (!YOLO_URL || YOLO_URL.trim() === "" || YOLO_URL.startsWith("/")) {
-      console.error("YOLO_URL appears invalid:", YOLO_URL);
-      setStatus("Invalid backend URL. Set REACT_APP_YOLO_URL to your backend full URL.");
-      return;
-    }
-
-    const ctx = canvas.getContext("2d");
-    canvas.width = videoEl.videoWidth || 640;
-    canvas.height = videoEl.videoHeight || 480;
-    ctx.drawImage(videoEl, 0, 0);
-
-    const imageBase64 = canvas.toDataURL("image/jpeg", 0.7).split(",")[1];
-
-    // Abort after timeout to avoid piling up requests
-    const controller = new AbortController();
-    const timeoutMs = 8000; // 8s timeout
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
+      if (!videoEl || videoEl.readyState < 2 || !canvas) return;
+
+      // guard URL
+      if (!YOLO_URL || YOLO_URL.trim() === "" || YOLO_URL.startsWith("/")) {
+        console.error("YOLO_URL invalid:", YOLO_URL);
+        setStatus("Invalid backend URL. Set REACT_APP_YOLO_URL to full https://.../detect");
+        return;
+      }
+
+      const ctx = canvas.getContext("2d");
+      canvas.width = videoEl.videoWidth || 640;
+      canvas.height = videoEl.videoHeight || 480;
+      ctx.drawImage(videoEl, 0, 0);
+
+      const imageBase64 = canvas.toDataURL("image/jpeg", 0.75).split(",")[1];
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+
       const res = await fetch(YOLO_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ imageBase64 }),
-        signal: controller.signal
+        signal: controller.signal,
       });
 
       clearTimeout(timeout);
 
       if (!res.ok) {
-        // Helpful handling for common production mistakes
         if (res.status === 405) {
-          setStatus("Backend 405: Method Not Allowed — check your backend URL and route (/detect) or CORS settings.");
+          setStatus("Backend 405: wrong URL — must end with /detect");
         } else if (res.status === 404) {
-          setStatus("Backend 404: Not Found — verify the backend URL (REACT_APP_YOLO_URL).");
-        } else if (res.status === 0) {
-          setStatus("Network error contacting backend.");
+          setStatus("Backend 404: check REACT_APP_YOLO_URL");
         } else {
           setStatus(`Backend HTTP ${res.status}`);
         }
-
-        // try to read the body (may help debugging)
-        try {
-          const text = await res.text();
-          console.error("YOLO backend non-ok response:", res.status, text);
-        } catch (e) {
-          console.error("Unable to read non-ok response body", e);
-        }
-
         setDetections([]);
         setOcrText([]);
         return;
@@ -115,8 +120,13 @@ const ObjectIdentifier = () => {
 
       const data = await res.json();
 
-      // set OCR text if available (backend returns ocr_text)
-      setOcrText(data.ocr_text ? (Array.isArray(data.ocr_text) ? data.ocr_text : [data.ocr_text]) : []);
+      const ocr = data.ocr_text
+        ? Array.isArray(data.ocr_text)
+          ? data.ocr_text
+          : [data.ocr_text]
+        : [];
+
+      setOcrText(ocr);
 
       if (Array.isArray(data.detections)) {
         applyGuardrails(data.detections);
@@ -124,10 +134,12 @@ const ObjectIdentifier = () => {
         setDetections([]);
       }
 
+      // If OCR has text but YOLO filtered everything, update status so user sees OCR is working
+      if (ocr.length > 0 && (!Array.isArray(data.detections) || data.detections.length === 0)) {
+        setStatus("Text detected — using OCR assistance");
+      }
     } catch (err) {
-      clearTimeout(timeout);
-      if (err.name === "AbortError") {
-        console.error("YOLO request timed out");
+      if (err?.name === "AbortError") {
         setStatus("Backend request timed out");
       } else {
         console.error("YOLO error:", err);
@@ -135,14 +147,16 @@ const ObjectIdentifier = () => {
       }
       setDetections([]);
       setOcrText([]);
+    } finally {
+      inflightRef.current = false;
     }
-  }, [applyGuardrails]);
+  }, [YOLO_URL, applyGuardrails]);
 
   /* ---------------- CAMERA ---------------- */
   const startCamera = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment" }
+        video: { facingMode: "environment" },
       });
 
       if (videoRef.current) videoRef.current.srcObject = stream;
@@ -150,10 +164,8 @@ const ObjectIdentifier = () => {
 
       if (intervalRef.current) clearInterval(intervalRef.current);
 
-      // first immediate check + regular interval
       sendFrameToYOLO();
       intervalRef.current = setInterval(sendFrameToYOLO, 1500);
-
     } catch (err) {
       console.error(err);
       setStatus("Camera error: " + (err?.message || String(err)));
@@ -162,21 +174,15 @@ const ObjectIdentifier = () => {
 
   /* ---------------- LIFECYCLE ---------------- */
   useEffect(() => {
-    // start camera using stable callback
     startCamera();
 
-    // copy ref to a local variable for cleanup to silence the linter
     const mountedVideo = videoRef.current;
-
     return () => {
       try {
         if (mountedVideo?.srcObject) {
-          mountedVideo.srcObject.getTracks().forEach(t => t.stop());
+          mountedVideo.srcObject.getTracks().forEach((t) => t.stop());
         }
-      } catch (e) {
-        // swallow
-      }
-
+      } catch (e) {}
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
         intervalRef.current = null;
@@ -205,21 +211,27 @@ const ObjectIdentifier = () => {
         <p>No valid objects detected</p>
       ) : (
         detections.map((d, i) => (
-          <div key={i} style={{ marginBottom: 12, padding: 10, border: "1px solid #ddd", borderRadius: 8 }}>
-            <strong>{d.label} ({Math.round(d.confidence * 100)}%)</strong>
+          <div
+            key={i}
+            style={{
+              marginBottom: 12,
+              padding: 10,
+              border: "1px solid #ddd",
+              borderRadius: 8,
+            }}
+          >
+            <strong>
+              {d.label} ({Math.round(Number(d.confidence) * 100)}%)
+            </strong>
             <div style={{ marginTop: 8 }}>
-              <button onClick={() => setConfirmedItem(d.label)}>
-                Confirm
-              </button>
+              <button onClick={() => setConfirmedItem(d.label)}>Confirm</button>
             </div>
           </div>
         ))
       )}
 
       {detections.length === 0 && (
-        <button onClick={() => setConfirmedItem("Unknown")}>
-          Mark as Unknown
-        </button>
+        <button onClick={() => setConfirmedItem("Unknown")}>Mark as Unknown</button>
       )}
 
       {confirmedItem && (
@@ -232,11 +244,12 @@ const ObjectIdentifier = () => {
       {ocrText.length > 0 && (
         <div style={{ marginTop: 25 }}>
           <h3>Detected Text (OCR):</h3>
-          {ocrText.map((t, idx) => (<div key={idx}>{t}</div>))}
+          {ocrText.map((t, idx) => (
+            <div key={idx}>{t}</div>
+          ))}
         </div>
       )}
 
-      {/* small helper to show which backend URL is being used */}
       <div style={{ marginTop: 18, fontSize: 12, color: "#666" }}>
         Backend: {YOLO_URL}
       </div>
