@@ -2,10 +2,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 /* ---------------- Stable config constants (top-level) ---------------- */
-const CONFIDENCE_THRESHOLD = 0.45; // lowered so YOLO results show up more often
+const CONFIDENCE_THRESHOLD = 0.45;
 const ALLOWED_CLASSES = ["mask", "gloves", "syringe", "bandage", "catheter", "gown"];
 
-// Default production backend
 const DEFAULT_YOLO_URL = "https://sos-vision-backend-production.up.railway.app/detect";
 
 /**
@@ -15,18 +14,14 @@ function normalizeBackendUrl(rawUrl) {
   if (!rawUrl) return "";
   let url = String(rawUrl).trim();
 
-  // If someone pasted "sos-vision-backend..." without scheme
   if (!/^https?:\/\//i.test(url)) {
     url = "https://" + url.replace(/^\/+/, "");
   }
 
-  // Force https
   url = url.replace(/^http:\/\//i, "https://");
-
   return url;
 }
 
-/* ---------------- Component ---------------- */
 const ObjectIdentifier = () => {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -42,7 +37,6 @@ const ObjectIdentifier = () => {
     return normalizeBackendUrl(process.env.REACT_APP_YOLO_URL || DEFAULT_YOLO_URL);
   }, []);
 
-  /* ---------------- GUARDRAILS ---------------- */
   const applyGuardrails = useCallback((rawDetections) => {
     setConfirmedItem(null);
 
@@ -67,9 +61,7 @@ const ObjectIdentifier = () => {
     }
   }, []);
 
-  /* ---------------- YOLO REQUEST ---------------- */
   const sendFrameToYOLO = useCallback(async () => {
-    // prevent piling up requests (important on slow networks)
     if (inflightRef.current) return;
     inflightRef.current = true;
 
@@ -79,7 +71,6 @@ const ObjectIdentifier = () => {
     try {
       if (!videoEl || videoEl.readyState < 2 || !canvas) return;
 
-      // guard URL
       if (!YOLO_URL || YOLO_URL.trim() === "" || YOLO_URL.startsWith("/")) {
         console.error("YOLO_URL invalid:", YOLO_URL);
         setStatus("Invalid backend URL. Set REACT_APP_YOLO_URL to full https://.../detect");
@@ -87,14 +78,22 @@ const ObjectIdentifier = () => {
       }
 
       const ctx = canvas.getContext("2d");
-      canvas.width = videoEl.videoWidth || 640;
-      canvas.height = videoEl.videoHeight || 480;
-      ctx.drawImage(videoEl, 0, 0);
 
-      const imageBase64 = canvas.toDataURL("image/jpeg", 0.75).split(",")[1];
+      // keep as much detail as possible for OCR
+      const w = videoEl.videoWidth || 640;
+      const h = videoEl.videoHeight || 480;
+      canvas.width = w;
+      canvas.height = h;
+
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(videoEl, 0, 0, w, h);
+
+      // Higher JPEG quality helps OCR a LOT
+      const imageBase64 = canvas.toDataURL("image/jpeg", 0.92).split(",")[1];
 
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000);
+      const timeout = setTimeout(() => controller.abort(), 12000);
 
       const res = await fetch(YOLO_URL, {
         method: "POST",
@@ -134,7 +133,6 @@ const ObjectIdentifier = () => {
         setDetections([]);
       }
 
-      // If OCR has text but YOLO filtered everything, update status so user sees OCR is working
       if (ocr.length > 0 && (!Array.isArray(data.detections) || data.detections.length === 0)) {
         setStatus("Text detected — using OCR assistance");
       }
@@ -152,7 +150,6 @@ const ObjectIdentifier = () => {
     }
   }, [YOLO_URL, applyGuardrails]);
 
-  /* ---------------- CAMERA ---------------- */
   const startCamera = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -172,7 +169,6 @@ const ObjectIdentifier = () => {
     }
   }, [sendFrameToYOLO]);
 
-  /* ---------------- LIFECYCLE ---------------- */
   useEffect(() => {
     startCamera();
 
@@ -190,7 +186,6 @@ const ObjectIdentifier = () => {
     };
   }, [startCamera]);
 
-  /* ---------------- UI ---------------- */
   return (
     <div style={{ textAlign: "center", padding: 15 }}>
       <h2>{status}</h2>
