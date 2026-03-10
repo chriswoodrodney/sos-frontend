@@ -46,13 +46,14 @@ const ObjectIdentifier = () => {
     let filtered = Array.isArray(rawDetections) ? rawDetections.slice() : [];
 
     filtered = filtered.filter((d) => Number(d.confidence) >= CONFIDENCE_THRESHOLD);
-    filtered = filtered.filter((d) => ALLOWED_CLASSES.includes(String(d.label).toLowerCase()));
+    filtered = filtered.filter((d) =>
+      ALLOWED_CLASSES.includes(String(d.label).toLowerCase())
+    );
     filtered = filtered
       .sort((a, b) => Number(b.confidence) - Number(a.confidence))
       .slice(0, 3);
 
     if (filtered.length === 0) {
-      // ✅ Restore original UI wording (no extra OCR messaging)
       setStatus("Low confidence or non-medical item detected");
       setDetections([]);
     } else {
@@ -79,18 +80,28 @@ const ObjectIdentifier = () => {
 
       const ctx = canvas.getContext("2d");
 
-      // keep as much detail as possible for OCR
-      const w = videoEl.videoWidth || 640;
-      const h = videoEl.videoHeight || 480;
-      canvas.width = w;
-      canvas.height = h;
+      // Slightly smaller frames to reduce backend memory/CPU load
+      const sourceW = videoEl.videoWidth || 640;
+      const sourceH = videoEl.videoHeight || 480;
+
+      const maxWidth = 960;
+      let targetW = sourceW;
+      let targetH = sourceH;
+
+      if (sourceW > maxWidth) {
+        const scale = maxWidth / sourceW;
+        targetW = Math.round(sourceW * scale);
+        targetH = Math.round(sourceH * scale);
+      }
+
+      canvas.width = targetW;
+      canvas.height = targetH;
 
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = "high";
-      ctx.drawImage(videoEl, 0, 0, w, h);
+      ctx.drawImage(videoEl, 0, 0, targetW, targetH);
 
-      // Higher JPEG quality helps OCR a LOT
-      const imageBase64 = canvas.toDataURL("image/jpeg", 0.92).split(",")[1];
+      const imageBase64 = canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
 
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 12000);
@@ -130,14 +141,9 @@ const ObjectIdentifier = () => {
       if (Array.isArray(data.detections)) {
         applyGuardrails(data.detections);
       } else {
-        // ✅ When no detections, keep original wording (do NOT override status)
         setDetections([]);
         setStatus("Low confidence or non-medical item detected");
       }
-
-      // ❌ Removed: status override like "Text detected — using OCR assistance"
-      // We keep UI exactly like your screenshot, and OCR text just appears below if found.
-
     } catch (err) {
       if (err?.name === "AbortError") {
         setStatus("Backend request timed out");
@@ -154,12 +160,12 @@ const ObjectIdentifier = () => {
 
   const startCamera = useCallback(async () => {
     try {
-      // Optional: request higher resolution to improve OCR
+      // Reduced resolution to lower backend memory pressure
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: "environment",
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
+          width: { ideal: 960 },
+          height: { ideal: 540 },
         },
       });
 
@@ -169,7 +175,7 @@ const ObjectIdentifier = () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
 
       sendFrameToYOLO();
-      intervalRef.current = setInterval(sendFrameToYOLO, 1500);
+      intervalRef.current = setInterval(sendFrameToYOLO, 3000);
     } catch (err) {
       console.error(err);
       setStatus("Camera error: " + (err?.message || String(err)));
@@ -186,6 +192,7 @@ const ObjectIdentifier = () => {
           mountedVideo.srcObject.getTracks().forEach((t) => t.stop());
         }
       } catch (e) {}
+
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
         intervalRef.current = null;
